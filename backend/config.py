@@ -10,3 +10,5 @@ CRAWL4AI_SETTINGS = {
 }
 
 # 其他配置参数可以根据需要添加  
+
+DS_API_KEY = 'sk-9a192140dde7483eb5438266b4d7a4e1'

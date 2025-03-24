@@ -4,11 +4,103 @@
 1. 确保你已经安装了所有必要的依赖包。
 2. 在终端中导航到项目的 `backend` 目录。
 3. 运行命令 `python app.py` 启动Flask应用。
+     .\venv\Scripts\Activate.ps1
+
 
 ## 查看结果
 - 访问 `http://127.0.0.1:5000/view_result?type=content` 查看爬取的具体内容。
 - 访问 `http://127.0.0.1:5000/view_result?type=title` 查看爬取的标题。
 - 访问 `http://127.0.0.1:5000/view_result?type=link` 查看爬取的链接。
+- 访问 `http://127.0.0.1:5000/view_truecontent` 查看爬取的正文内容。
+
+## 当前内容识别逻辑说明
+当前在爬取正文内容时使用的识别逻辑如下：
+
+```python
+# 尝试从 <div> 标签中提取正文内容
+soup = BeautifulSoup(result.html, 'html.parser')
+# 假设正文在某个特定的 <div> 标签中
+content_div = soup.find('div', class_='content')  # 根据实际情况调整 class 名称
+content = content_div.get_text(strip=True) if content_div else 'No content found'
+```
+
+这种识别方法存在以下限制：
+1. 仅尝试寻找 `class='content'` 的 div 标签
+2. 如果网页中没有这样的标签，将返回 "No content found"
+3. 不同网站的内容结构差异很大，单一的选择器可能无法适应所有网站
+
+### 改进建议
+参考 Crawl4AI 官方文档，应该采用以下方式改进内容识别：
+
+1. **使用更灵活的选择器**：根据网站的具体结构调整选择器，例如：
+   ```python
+   # 尝试多种可能的内容选择器
+   content_selectors = [
+       'div.content', 'div.article-content', 'article', 
+       'div.post-content', 'div.entry-content', 'main'
+   ]
+   
+   for selector in content_selectors:
+       content_element = soup.select_one(selector)
+       if content_element:
+           return content_element.get_text(strip=True)
+   ```
+
+2. **利用 Crawl4AI 的内容提取功能**：Crawl4AI 提供了自动识别主要内容的能力，通过设置 `fit_markdown=True` 可以获取最相关的内容。
+
+3. **结合 LLM 的内容识别**：对于复杂页面，可以使用 LLM 辅助提取关键内容。
+
+## 多个链接测试
+1. 编辑 `backend/test_request.py` 文件中的 `indices` 变量来指定要测试的链接索引。
+2. 运行 `python test_request.py` 发送爬取请求。
+3. 访问相应的 URL 查看爬取结果。
+
+## 进阶爬取技巧（参考 Crawl4AI 官方文档）
+
+### 内容提取策略
+Crawl4AI 提供了多种内容提取策略：
+
+1. **原始提取**：获取完整的 HTML 内容
+   ```python
+   result = await crawler.arun(url="https://example.com")
+   print(result.html)  # 原始 HTML
+   ```
+
+2. **Markdown 转换**：转换为易于处理的 Markdown 格式
+   ```python
+   print(result.markdown)  # Markdown 格式
+   ```
+
+3. **智能内容识别**：使用 `fit_markdown` 提取最相关内容
+   ```python
+   config = CrawlerRunConfig(fit_markdown=True)
+   result = await crawler.arun(url="https://example.com", config=config)
+   print(result.markdown.fit_markdown)  # 最相关内容
+   ```
+
+4. **CSS 选择器**：使用特定选择器精确定位内容
+   ```python
+   config = CrawlerRunConfig(css_selector="article.main-content")
+   ```
+
+### 处理动态内容
+对于动态加载的网页内容：
+
+1. **等待元素加载**：
+   ```python
+   config = CrawlerRunConfig(wait_for=".content-loaded")
+   ```
+
+2. **执行 JavaScript**：
+   ```python
+   js_code = "window.scrollTo(0, document.body.scrollHeight);"
+   config = CrawlerRunConfig(js_code=[js_code])
+   ```
+
+3. **延迟捕获**：
+   ```python
+   config = CrawlerRunConfig(delay_before_return_html=2.0)
+   ```
 
 ---
 

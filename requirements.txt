@@ -1,0 +1,6 @@
+Flask
+openpyxl
+crawl4ai
+beautifulsoup4
+requests
+nltk 

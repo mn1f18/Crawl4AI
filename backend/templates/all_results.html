@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>所有爬取结果</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        pre { background-color: #f4f4f4; padding: 10px; border-radius: 5px; }
+        .result-container { 
+            margin-bottom: 30px; 
+            padding: 15px; 
+            border: 1px solid #ddd; 
+            border-radius: 5px;
+        }
+        .result-header {
+            background-color: #f0f0f0;
+            padding: 8px;
+            border-radius: 5px;
+            margin-bottom: 10px;
+        }
+    </style>
+</head>
+<body>
+    <h1>所有爬取结果</h1>
+    
+    {% for result in results %}
+    <div class="result-container">
+        <div class="result-header">
+            <h2>索引 #{{ result.index }}</h2>
+            <h3>URL: {{ result.url }}</h3>
+        </div>
+        
+        <h3>内容:</h3>
+        <pre>{{ result.content[:1000] }}...</pre>
+        
+        <h3>爬取用时 (秒):</h3>
+        <pre>{{ result.duration }}</pre>
+        
+        <h3>字符数:</h3>
+        <pre>{{ result.content|length }}</pre>
+    </div>
+    {% endfor %}
+</body>
+</html> 
