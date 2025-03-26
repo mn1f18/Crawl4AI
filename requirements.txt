@@ -1,6 +1,7 @@
-Flask
-openpyxl
-crawl4ai
-beautifulsoup4
-requests
-nltk 
+Flask>=2.0.1
+openpyxl>=3.0.9
+crawl4ai>=0.1.0
+beautifulsoup4>=4.10.0
+requests>=2.26.0
+nltk>=3.6.5
+pydantic>=1.8.2
