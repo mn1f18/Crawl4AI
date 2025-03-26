@@ -6,7 +6,17 @@
     <title>正文内容</title>
     <style>
         body { font-family: Arial, sans-serif; margin: 20px; }
-        pre { background-color: #f4f4f4; padding: 10px; border-radius: 5px; overflow: auto; max-height: 500px; }
+        pre { 
+            background-color: #f4f4f4; 
+            padding: 10px; 
+            border-radius: 5px; 
+            overflow: auto; 
+            max-height: 500px;
+            white-space: pre-wrap;       /* 保留空白，但允许文本换行 */
+            word-wrap: break-word;       /* 允许长单词在必要时换行 */
+            font-size: 14px;
+            line-height: 1.5;
+        }
         .result-container { 
             margin-bottom: 30px; 
             padding: 15px; 
@@ -19,32 +29,114 @@
             border-radius: 5px;
             margin-bottom: 10px;
         }
+        .error-container {
+            border-color: #ffcccc;
+            background-color: #fff8f8;
+        }
+        .error-header {
+            background-color: #ffdddd;
+            color: #cc0000;
+        }
+        .error-message {
+            color: #cc0000;
+            font-weight: bold;
+            border-left: 4px solid #cc0000;
+            padding-left: 10px;
+        }
+        .status-badge {
+            display: inline-block;
+            padding: 3px 8px;
+            border-radius: 4px;
+            font-size: 14px;
+            font-weight: bold;
+        }
+        .status-success {
+            background-color: #dff0d8;
+            color: #3c763d;
+        }
+        .status-error {
+            background-color: #f2dede;
+            color: #a94442;
+        }
+        .content-source {
+            display: inline-block;
+            padding: 3px 8px;
+            border-radius: 4px;
+            font-size: 14px;
+            font-weight: bold;
+            background-color: #e6f7ff;
+            color: #0366d6;
+            margin-left: 10px;
+        }
+        .content-stats {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 20px;
+            margin-bottom: 10px;
+            background-color: #f8f9fa;
+            padding: 10px;
+            border-radius: 5px;
+        }
+        .stat-item {
+            display: flex;
+            flex-direction: column;
+        }
+        .stat-label {
+            font-size: 12px;
+            color: #666;
+        }
+        .stat-value {
+            font-size: 16px;
+            font-weight: bold;
+        }
     </style>
 </head>
 <body>
-    <h1>正文内容</h1>
+    <h1>正文内容提取结果</h1>
     
     {% for result in results %}
-    <div class="result-container">
-        <div class="result-header">
+    <div class="result-container {% if result.error %}error-container{% endif %}">
+        <div class="result-header {% if result.error %}error-header{% endif %}">
             <h2>索引 #{{ result.index }}</h2>
-            <h3>URL: {{ result.url }}</h3>
+            <h3>URL: <a href="{{ result.url }}" target="_blank">{{ result.url }}</a></h3>
+            {% if result.error %}
+            <h3 class="error-message">错误状态: 
+                <span class="status-badge status-error">爬取失败</span>
+            </h3>
+            {% else %}
+            <h3>状态: 
+                <span class="status-badge status-success">成功</span>
+                {% if result.content_source %}
+                <span class="content-source">{{ result.content_source }}</span>
+                {% endif %}
+            </h3>
+            {% endif %}
+        </div>
+        
+        <div class="content-stats">
+            <div class="stat-item">
+                <span class="stat-label">字符数</span>
+                <span class="stat-value">{{ result.token_count }}</span>
+            </div>
+            <div class="stat-item">
+                <span class="stat-label">爬取用时 (秒)</span>
+                <span class="stat-value">{{ result.duration }}</span>
+            </div>
+            {% if not result.error and result.content|length > 0 %}
+            <div class="stat-item">
+                <span class="stat-label">预计阅读时间</span>
+                <span class="stat-value">{{ (result.content|length / 500)|round(1) }} 分钟</span>
+            </div>
+            {% endif %}
         </div>
         
         <h3>内容:</h3>
-        <pre>{{ result.content }}</pre>
+        <pre {% if result.error %}class="error-message"{% endif %}>{{ result.content }}</pre>
         
-        <h3>字符数:</h3>
-        <pre>{{ result.token_count }}</pre>
-        
-        <h3>DS 结果:</h3>
-        <pre>{{ result.ds_result }}</pre>
-        
-        <h3>Prompt:</h3>
-        <pre>{{ prompt }}</pre>
-        
-        <h3>爬取用时 (秒):</h3>
-        <pre>{{ result.duration }}</pre>
+        {% if not result.error and result.ds_result != 'DS接口未使用' %}
+        <h3>DS 分析结果:</h3>
+        <pre {% if 'DS接口错误' in result.ds_result %}class="error-message"{% endif %}>{{ result.ds_result }}</pre>
+        {% endif %}
     </div>
     {% endfor %}
 </body>

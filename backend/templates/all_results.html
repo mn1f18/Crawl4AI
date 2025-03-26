@@ -19,20 +19,58 @@
             border-radius: 5px;
             margin-bottom: 10px;
         }
+        .error-container {
+            border-color: #ffcccc;
+            background-color: #fff8f8;
+        }
+        .error-header {
+            background-color: #ffdddd;
+            color: #cc0000;
+        }
+        .error-message {
+            color: #cc0000;
+            font-weight: bold;
+            border-left: 4px solid #cc0000;
+            padding-left: 10px;
+        }
+        .status-badge {
+            display: inline-block;
+            padding: 3px 8px;
+            border-radius: 4px;
+            font-size: 14px;
+            font-weight: bold;
+        }
+        .status-success {
+            background-color: #dff0d8;
+            color: #3c763d;
+        }
+        .status-error {
+            background-color: #f2dede;
+            color: #a94442;
+        }
     </style>
 </head>
 <body>
     <h1>所有爬取结果</h1>
     
     {% for result in results %}
-    <div class="result-container">
-        <div class="result-header">
+    <div class="result-container {% if result.error %}error-container{% endif %}">
+        <div class="result-header {% if result.error %}error-header{% endif %}">
             <h2>索引 #{{ result.index }}</h2>
             <h3>URL: {{ result.url }}</h3>
+            {% if result.error %}
+            <h3 class="error-message">错误状态: 
+                <span class="status-badge status-error">爬取失败</span>
+            </h3>
+            {% else %}
+            <h3>状态: 
+                <span class="status-badge status-success">成功</span>
+            </h3>
+            {% endif %}
         </div>
         
         <h3>内容:</h3>
-        <pre>{{ result.content[:1000] }}...</pre>
+        <pre {% if result.error %}class="error-message"{% endif %}>{% if result.error %}{{ result.content }}{% else %}{{ result.content[:1000] }}...{% endif %}</pre>
         
         <h3>爬取用时 (秒):</h3>
         <pre>{{ result.duration }}</pre>

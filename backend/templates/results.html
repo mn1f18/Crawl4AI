@@ -19,20 +19,37 @@
             border-radius: 5px;
             margin-bottom: 10px;
         }
+        .error-container {
+            border-color: #ffcccc;
+            background-color: #fff8f8;
+        }
+        .error-header {
+            background-color: #ffdddd;
+            color: #cc0000;
+        }
+        .error-message {
+            color: #cc0000;
+            font-weight: bold;
+            border-left: 4px solid #cc0000;
+            padding-left: 10px;
+        }
     </style>
 </head>
 <body>
     <h1>爬取结果 - {{ type }}</h1>
     
     {% for result in results %}
-    <div class="result-container">
-        <div class="result-header">
+    <div class="result-container {% if result.error %}error-container{% endif %}">
+        <div class="result-header {% if result.error %}error-header{% endif %}">
             <h2>索引 #{{ result.index }}</h2>
             <h3>URL: {{ result.url }}</h3>
+            {% if result.error %}
+            <h3 class="error-message">错误状态: 爬取失败</h3>
+            {% endif %}
         </div>
         
         <h3>内容:</h3>
-        <pre>{{ result.content }}</pre>
+        <pre {% if result.error %}class="error-message"{% endif %}>{{ result.content }}</pre>
         
         <h3>字符数:</h3>
         <pre>{{ result.content|length }}</pre>

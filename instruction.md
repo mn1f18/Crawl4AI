@@ -3,7 +3,7 @@
 ## 启动步骤
 1. 确保你已经安装了所有必要的依赖包。
 2. 在终端中导航到项目的 `backend` 目录。
-3. 运行命令 `python app.py` 启动Flask应用。
+3. 运行命令 `python app.py` 启动Flask应用。   C:\Python\github\Crawl4AI> venv\Scripts\activate.bat
      .\venv\Scripts\Activate.ps1
 
 
@@ -11,44 +11,113 @@
 - 访问 `http://127.0.0.1:5000/view_result?type=content` 查看爬取的具体内容。
 - 访问 `http://127.0.0.1:5000/view_result?type=title` 查看爬取的标题。
 - 访问 `http://127.0.0.1:5000/view_result?type=link` 查看爬取的链接。
+- 访问 `http://127.0.0.1:5000/view_result?type=article` 查看使用选择器提取的文章正文（推荐）。
 - 访问 `http://127.0.0.1:5000/view_truecontent` 查看爬取的正文内容。
 
-## 当前内容识别逻辑说明
-当前在爬取正文内容时使用的识别逻辑如下：
+## 自动识别正文接口
+项目提供了专门用于识别网页正文和标题的接口：
 
-```python
-# 尝试从 <div> 标签中提取正文内容
-soup = BeautifulSoup(result.html, 'html.parser')
-# 假设正文在某个特定的 <div> 标签中
-content_div = soup.find('div', class_='content')  # 根据实际情况调整 class 名称
-content = content_div.get_text(strip=True) if content_div else 'No content found'
-```
+### 接口说明
+- 路径: `/extract_content`
+- 方法: POST
+- 请求体格式:
+  ```json
+  {
+    "url": "要爬取的链接地址",
+    "index": 可选的索引编号
+  }
+  ```
+- 响应格式:
+  ```json
+  {
+    "success": true,
+    "title": "识别出的文章标题",
+    "content": "识别出的正文内容",
+    "extraction_method": "使用的提取方法",
+    "title_selector": "标题选择器",
+    "article_selector": "内容选择器", 
+    "url": "原始URL",
+    "index": "索引编号",
+    "char_count": "字符数量",
+    "duration": "爬取耗时"
+  }
+  ```
 
-这种识别方法存在以下限制：
-1. 仅尝试寻找 `class='content'` 的 div 标签
-2. 如果网页中没有这样的标签，将返回 "No content found"
-3. 不同网站的内容结构差异很大，单一的选择器可能无法适应所有网站
+## 内容提取方法说明
 
-### 改进建议
-参考 Crawl4AI 官方文档，应该采用以下方式改进内容识别：
+系统现在默认使用`article`方法进行内容提取，这种方法能更精准地识别文章正文，特别适合博客、新闻和文章类网页。
 
-1. **使用更灵活的选择器**：根据网站的具体结构调整选择器，例如：
+### 内容类型参数说明
+- `article`：（默认）使用CSS选择器精准定位文章内容，优先检测常见的文章容器（如article、main、.content等）
+- `truecontent`：使用多层提取策略，优先尝试fit_markdown，然后按优先级回退到其他方法
+- `content`：基础提取，获取整个页面的markdown内容
+- `title`：仅提取页面标题
+- `link`：提取页面中的链接
+
+推荐在所有需要提取正文的场景下使用`article`或`extract_content`接口以获得最佳结果。
+
+## 索引控制参数
+所有视图路由都支持以下URL参数：
+
+- `max`: 设置最大爬取链接数。例如: `?max=15` 将爬取索引1到15的链接
+- `indices`: 指定要爬取的索引列表。例如: `?indices=1,3,5-8,10` 将只爬取索引1,3,5,6,7,8和10的链接
+
+## 增强版内容识别逻辑说明
+系统使用多层次的内容识别策略，按以下优先顺序提取内容：
+
+### 高级内容过滤器
+系统首先尝试使用Crawl4AI提供的高级内容过滤器来识别和提取最相关的内容：
+
+1. **PruningContentFilter**: 基于文本密度、链接密度和标签重要性来评估页面元素，自动移除低价值内容
    ```python
-   # 尝试多种可能的内容选择器
-   content_selectors = [
-       'div.content', 'div.article-content', 'article', 
-       'div.post-content', 'div.entry-content', 'main'
-   ]
-   
-   for selector in content_selectors:
-       content_element = soup.select_one(selector)
-       if content_element:
-           return content_element.get_text(strip=True)
+   prune_filter = PruningContentFilter(
+       threshold=0.45,           # 调低阈值以保留更多内容
+       threshold_type="dynamic",  # 动态阈值更灵活
+       min_word_threshold=5      # 只忽略少于5个词的节点
+   )
    ```
 
-2. **利用 Crawl4AI 的内容提取功能**：Crawl4AI 提供了自动识别主要内容的能力，通过设置 `fit_markdown=True` 可以获取最相关的内容。
+2. **CrawlerRunConfig高级配置**:
+   ```python
+   config = CrawlerRunConfig(
+       markdown_generator=md_generator,
+       word_count_threshold=10,                # 过滤掉短文本块
+       excluded_tags=["nav", "footer", "header"], # 排除这些标签
+       exclude_external_links=True,            # 排除外部链接
+       remove_overlay_elements=True            # 移除弹窗覆盖元素
+   )
+   ```
 
-3. **结合 LLM 的内容识别**：对于复杂页面，可以使用 LLM 辅助提取关键内容。
+### 多层次内容提取
+如果高级过滤器不可用或提取失败，系统会按以下顺序尝试：
+
+1. **Fit Markdown智能提取**: 如果可用，使用Crawl4AI的`fit_markdown`功能（已经过滤掉低价值内容）
+
+2. **原始Markdown**: 尝试使用Crawl4AI提供的原始Markdown格式内容
+
+3. **CSS选择器匹配**: 尝试使用多种常见的内容选择器，按优先级尝试：
+   ```
+   'article', 'main', 'div.content', 'div.article-content', 
+   'div.post-content', 'div.entry-content', '.article-body', 
+   '.news-content', '#content', '.story-body', '.entry', '.post',
+   'section.content', '[itemprop="articleBody"]',
+   '.article', '.blog-post', '.main-content'
+   ```
+   在找到匹配元素后，会删除可能干扰的子元素（如广告、导航栏等）
+
+4. **全文提取**: 作为最后的备选方案，移除脚本、样式等元素后提取整个页面的文本内容
+
+每次提取都会显示使用的提取方法，帮助用户理解内容来源。
+
+### PruningContentFilter 工作原理
+PruningContentFilter 使用以下因素来评估内容的相关性：
+
+- **文本密度**: 鼓励具有较高文本/内容比例的块
+- **链接密度**: 对主要是链接的部分进行惩罚
+- **标签重要性**: 例如，`<article>` 或 `<p>` 可能比 `<div>` 更重要
+- **结构上下文**: 如果节点深度嵌套或在疑似侧边栏中，可能会被降低优先级
+
+这种多层次的方法可以自动识别和提取页面的主要内容，即使面对复杂的页面结构也能表现良好。
 
 ## 多个链接测试
 1. 编辑 `backend/test_request.py` 文件中的 `indices` 变量来指定要测试的链接索引。
@@ -73,8 +142,15 @@ Crawl4AI 提供了多种内容提取策略：
 
 3. **智能内容识别**：使用 `fit_markdown` 提取最相关内容
    ```python
-   config = CrawlerRunConfig(fit_markdown=True)
+   from crawl4ai.content_filter_strategy import PruningContentFilter
+   from crawl4ai.markdown_generation_strategy import DefaultMarkdownGenerator
+   
+   prune_filter = PruningContentFilter(threshold=0.45)
+   md_generator = DefaultMarkdownGenerator(content_filter=prune_filter)
+   
+   config = CrawlerRunConfig(markdown_generator=md_generator)
    result = await crawler.arun(url="https://example.com", config=config)
+   
    print(result.markdown.fit_markdown)  # 最相关内容
    ```
 
