@@ -19,7 +19,7 @@ if len(sys.argv) >= 3:
 else:
 
     start_index = 1
-    end_index = 20
+    end_index = 17
 
 # 指定要测试的链接索引列表
 indices = list(range(start_index, end_index + 1))

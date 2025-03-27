@@ -16,7 +16,7 @@ if len(sys.argv) >= 3:
 else:
     # 默认爬取范围
     start_index = 1
-    end_index = 79
+    end_index = 2
 
 # 指定要测试的链接索引列表
 indices = list(range(start_index, end_index + 1))
