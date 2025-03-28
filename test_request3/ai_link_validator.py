@@ -257,7 +257,14 @@ def batch_link_validation(links_info, base_url, html_content=None):
     
     print(f"🔍 开始筛选 {len(links_info)} 个链接...")
     for link_info in links_info:
-        url = link_info['url']
+        # 统一处理url键
+        url = None
+        if 'url' in link_info:
+            url = link_info['url']
+        elif 'link' in link_info:
+            url = link_info['link']
+            # 统一为url键
+            link_info['url'] = url
         
         # 跳过空链接或非字符串链接
         if not url or not isinstance(url, str):
@@ -273,10 +280,15 @@ def batch_link_validation(links_info, base_url, html_content=None):
         else:
             full_url = url
             
+        # 更新为完整URL
+        link_info['url'] = full_url
+            
         # 检查缓存
         if full_url in url_judgment_cache:
             if url_judgment_cache[full_url]:
-                link_info['url'] = full_url
+                link_info['is_valid'] = True
+                link_info['ai_score'] = 80  # 默认分数
+                link_info['ai_reason'] = "缓存验证通过"
                 valid_links.append(link_info)
             continue
             
@@ -287,12 +299,12 @@ def batch_link_validation(links_info, base_url, html_content=None):
             continue
             
         # 添加到待处理列表
-        link_info['url'] = full_url
         filtered_links.append(link_info)
     
     # 如果没有链接需要验证，直接返回
     if not filtered_links:
         print("⚠️ 基础筛选后没有链接需要AI验证")
+        # 关键修改：如果没有链接需要验证，返回已验证通过的链接
         return valid_links
     
     print(f"✅ 基础筛选后有 {len(filtered_links)} 个链接需要AI验证")
@@ -312,6 +324,10 @@ def batch_link_validation(links_info, base_url, html_content=None):
             link_info = batch[0]
             print(f"  - 验证单个链接: {link_info['url']}")
             if is_valid_news_link_with_ai(link_info['url'], base_url, link_info.get('a_tag')):
+                # 添加验证信息
+                link_info['is_valid'] = True
+                link_info['ai_score'] = 80  # 默认分数
+                link_info['ai_reason'] = "AI验证通过"
                 valid_links.append(link_info)
                 print(f"  ✅ 链接有效: {link_info['url']}")
             else:
@@ -365,6 +381,7 @@ def batch_link_validation(links_info, base_url, html_content=None):
                         url = item.get("url")
                         is_valid = item.get("is_valid", False)
                         score = item.get("score", 0)
+                        reason = item.get("reason", "")
                         
                         # 缓存结果
                         url_judgment_cache[url] = is_valid
@@ -375,6 +392,10 @@ def batch_link_validation(links_info, base_url, html_content=None):
                             # 找到对应的link_info
                             for link_info in batch:
                                 if link_info['url'] == url:
+                                    # 添加验证信息
+                                    link_info['is_valid'] = True
+                                    link_info['ai_score'] = score
+                                    link_info['ai_reason'] = reason or "AI验证通过"
                                     valid_links.append(link_info)
                                     print(f"  ✅ 链接有效 (分数: {score}): {url}")
                                     break
@@ -382,7 +403,7 @@ def batch_link_validation(links_info, base_url, html_content=None):
                             print(f"  ❌ 链接无效 (分数: {score}): {url}")
                         
                         # 记录日志
-                        log_link_decision(url, is_valid, score)
+                        log_link_decision(url, is_valid, score, reason)
                     
                     print(f"  📊 批次结果: {valid_count}/{len(batch)} 个有效链接")
                         
@@ -392,7 +413,12 @@ def batch_link_validation(links_info, base_url, html_content=None):
                     # 回退到逐个验证
                     for idx, link_info in enumerate(batch):
                         print(f"    🔍 验证链接 {idx+1}/{len(batch)}: {link_info['url']}")
-                        if is_valid_news_link_with_ai(link_info['url'], base_url, link_info.get('a_tag')):
+                        is_valid = is_valid_news_link_with_ai(link_info['url'], base_url, link_info.get('a_tag'))
+                        if is_valid:
+                            # 添加验证信息
+                            link_info['is_valid'] = True
+                            link_info['ai_score'] = 80  # 默认分数
+                            link_info['ai_reason'] = "单独AI验证通过"
                             valid_links.append(link_info)
                             print(f"    ✅ 链接有效: {link_info['url']}")
                         else:
@@ -404,7 +430,12 @@ def batch_link_validation(links_info, base_url, html_content=None):
                 # 回退到逐个验证
                 for idx, link_info in enumerate(batch):
                     print(f"    🔍 验证链接 {idx+1}/{len(batch)}: {link_info['url']}")
-                    if is_valid_news_link_with_ai(link_info['url'], base_url, link_info.get('a_tag')):
+                    is_valid = is_valid_news_link_with_ai(link_info['url'], base_url, link_info.get('a_tag'))
+                    if is_valid:
+                        # 添加验证信息
+                        link_info['is_valid'] = True
+                        link_info['ai_score'] = 80  # 默认分数
+                        link_info['ai_reason'] = "单独AI验证通过"
                         valid_links.append(link_info)
                         print(f"    ✅ 链接有效: {link_info['url']}")
                     else:

@@ -1406,5 +1406,32 @@
     "ai_score": 0,
     "ai_reason": "",
     "link_type": "非文章"
+  },
+  "tel:59824138030": {
+    "url": "tel:59824138030",
+    "title": "(+598) 2413 8030",
+    "first_seen": "2025-03-28T14:36:58.890886",
+    "last_updated": "2025-03-28T14:36:58.890886",
+    "is_valid": true,
+    "is_processed": false,
+    "content_length": 0,
+    "ai_score": 0.99,
+    "ai_reason": "冷启动模式：自动标记为有效",
+    "link_type": "未分类"
+  },
+  "https://www.gub.uy/ministerio-desarrollo-social/genero ": {
+    "url": "https://www.gub.uy/ministerio-desarrollo-social/genero ",
+    "title": "Marzo mes de las Mujeres:",
+    "first_seen": "2025-03-28T16:45:58.801426",
+    "last_updated": "2025-03-28T16:45:58.801426",
+    "is_valid": false,
+    "quality_score": 0,
+    "content_length": 0,
+    "error_message": "AI验证未通过",
+    "content_fingerprint": "",
+    "ai_score": 0,
+    "ai_reason": "AI验证未通过",
+    "crawl_count": 0,
+    "link_type": ""
   }
 }

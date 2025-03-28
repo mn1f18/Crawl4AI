@@ -1758,5 +1758,57 @@
     "ai_score": 90,
     "ai_reason": "链接指向具体新闻文章，URL结构包含文章标识符，链接文本看起来像新闻标题，且不包含非文章路径的标识符。",
     "link_type": "文章"
+  },
+  "https://www.beefcentral.com/news/buffel-grass-put-on-the-federal-election-agenda/": {
+    "url": "https://www.beefcentral.com/news/buffel-grass-put-on-the-federal-election-agenda/",
+    "title": "",
+    "is_valid": true,
+    "first_seen": "2025-03-27T15:28:29.260216",
+    "last_updated": "2025-03-27T15:28:39.383252",
+    "content_length": 6576,
+    "content_summary": "Buffel grass put on the Federal election agenda - Beef Central\nSection\nNetwork\nTop 25 Livestock Transporters 2025\nNews\nBeef 2021\nBeef 2021 Preview\nAgribusiness\nMultimedia\nCommunity & Lifestyle\nBeef Re...",
+    "quality_score": 90,
+    "error_message": "",
+    "content_fingerprint": "460e6b4c8246d3fcec53afddf447f010",
+    "crawl_count": 2,
+    "ai_score": 90,
+    "ai_reason": "链接指向具体新闻文章，URL结构包含文章标识符，链接文本看起来像新闻标题，且不包含非文章路径的标识符。",
+    "link_type": "文章"
+  },
+  "https://www.beefcentral.com/news/live-export-and-buffel-grass-on-the-ag-agenda-for-federal-election/": {
+    "url": "https://www.beefcentral.com/news/live-export-and-buffel-grass-on-the-ag-agenda-for-federal-election/",
+    "title": "",
+    "first_seen": "2025-03-28T14:36:40.476252",
+    "last_updated": "2025-03-28T14:36:40.476252",
+    "is_valid": true,
+    "is_processed": false,
+    "content_length": 0,
+    "ai_score": 0.99,
+    "ai_reason": "冷启动模式：自动标记为有效",
+    "link_type": "未分类"
+  },
+  "https://www.beefcentral.com/news/47-5m-investment-beefs-up-queenslands-regional-roads/": {
+    "url": "https://www.beefcentral.com/news/47-5m-investment-beefs-up-queenslands-regional-roads/",
+    "title": "",
+    "first_seen": "2025-03-28T14:36:40.476252",
+    "last_updated": "2025-03-28T14:36:40.476252",
+    "is_valid": true,
+    "is_processed": false,
+    "content_length": 0,
+    "ai_score": 0.99,
+    "ai_reason": "冷启动模式：自动标记为有效",
+    "link_type": "未分类"
+  },
+  "https://www.beefcentral.com/news/recruitment-news/recruitment-earning-others-trust-in-the-workplace/": {
+    "url": "https://www.beefcentral.com/news/recruitment-news/recruitment-earning-others-trust-in-the-workplace/",
+    "title": "",
+    "first_seen": "2025-03-28T14:36:40.476252",
+    "last_updated": "2025-03-28T14:36:40.476252",
+    "is_valid": true,
+    "is_processed": false,
+    "content_length": 0,
+    "ai_score": 0.99,
+    "ai_reason": "冷启动模式：自动标记为有效",
+    "link_type": "未分类"
   }
 }

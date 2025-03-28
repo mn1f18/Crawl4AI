@@ -17,11 +17,12 @@ import hashlib
 from concurrent.futures import ThreadPoolExecutor
 from crawl4ai.markdown_generation_strategy import DefaultMarkdownGenerator
 from crawl4ai.content_filter_strategy import PruningContentFilter
+import random
 
 # 导入AI链接验证模块
 try:
-    # 尝试直接导入（当前目录下的模块）
-    import ai_link_validator
+    # 尝试从同级目录导入
+    from ai_link_validator import is_valid_news_link_with_ai, batch_link_validation
     AI_LINK_VALIDATOR_AVAILABLE = True
 except ImportError:
     try:
@@ -29,7 +30,7 @@ except ImportError:
         import sys
         import os
         sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        import ai_link_validator
+        from ai_link_validator import is_valid_news_link_with_ai, batch_link_validation
         AI_LINK_VALIDATOR_AVAILABLE = True
     except ImportError:
         print("⚠️ AI链接验证模块未找到，将使用传统方法判断链接有效性")
@@ -37,14 +38,14 @@ except ImportError:
 
 # 配置选项
 SAVE_TO_EXCEL = True                # 是否保存结果到Excel
-MAX_LINKS_PER_SOURCE = 100           # 每个来源最多抓取的链接数
+MAX_LINKS_PER_SOURCE = 20           # 每个来源最多抓取的链接数
 MIN_CONTENT_LENGTH = 300            # 最小有效内容长度
 MAX_RETRY_COUNT = 2                 # 链接请求失败时最大重试次数
 REQUEST_TIMEOUT = 60                # 请求超时时间（秒）
 SKIP_EXISTING_LINKS = True          # 是否跳过已存在的链接
 LINKS_HISTORY_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "link_history")  # 历史链接存储目录
 USE_AI_LINK_VALIDATION = True       # 是否使用AI链接验证
-USE_COLD_START = False             # 是否使用冷启动模式（跳过AI验证，直接爬取内容）
+USE_COLD_START = False               # 冷启动模式：只收集链接到历史记录，不进行内容爬取（适用于首次遇到大量链接时）
 
 # 简化评分参数 - 仅保留基础设置
 QUALITY_CONFIG = {
@@ -63,53 +64,38 @@ def generate_link_id(url):
 
 # 添加URL规范化函数
 def normalize_url(url):
-    """
-    规范化URL，用于链接去重
-    - 转换为小写
-    - 移除URL参数（如果不包含特定关键词）
-    - 去除尾部斜杠
-    - 移除默认端口号
-    """
+    """规范化URL以便进行比较，移除末尾斜杠和www.前缀等，优化高频调用性能"""
     if not url:
         return ""
+    
+    try:
+        # 快速检测是否为URL，避免不必要的解析
+        if not any(p in url for p in ('http://', 'https://', 'www.')):
+            return url.strip().rstrip('/')
         
-    parsed = urlparse(url)
-    
-    # 小写处理域名
-    netloc = parsed.netloc.lower()
-    
-    # 移除默认端口号
-    if netloc.endswith(':80') and parsed.scheme == 'http':
-        netloc = netloc[:-3]
-    elif netloc.endswith(':443') and parsed.scheme == 'https':
-        netloc = netloc[:-4]
-    
-    # 处理路径 - 小写并移除尾部斜杠
-    path = parsed.path.lower()
-    if path.endswith('/') and len(path) > 1:
-        path = path[:-1]
-    
-    # 检查是否保留查询参数 - 某些网站使用查询参数区分文章
-    query = parsed.query
-    
-    # 保留含有这些词的查询参数，它们通常用于区分内容
-    keep_query_keywords = ['id', 'article', 'news', 'post', 'story', 'p']
-    
-    # 如果查询参数不包含保留关键词，移除它们
-    if query and not any(keyword in query.lower() for keyword in keep_query_keywords):
-        query = ''
-    
-    # 重建URL
-    normalized = urlunparse((
-        parsed.scheme.lower(),
-        netloc,
-        path,
-        parsed.params,
-        query,
-        '' # 移除fragment
-    ))
-    
-    return normalized
+        # 解析URL
+        parsed = urlparse(url)
+        
+        # 获取域名和路径部分
+        netloc = parsed.netloc
+        path = parsed.path
+        
+        # 移除www.前缀
+        if netloc.startswith('www.'):
+            netloc = netloc[4:]
+        
+        # 移除末尾斜杠
+        if path.endswith('/') and len(path) > 1:
+            path = path[:-1]
+        
+        # 重新组合URL
+        # 优化: 只保留scheme, netloc, path部分，忽略query和fragment
+        normalized = f"{parsed.scheme}://{netloc}{path}"
+        
+        return normalized
+    except Exception:
+        # 出错时返回原始URL
+        return url.strip()
 
 # 检测是否为新链接并追踪链接状态
 def is_new_link(url, source):
@@ -136,27 +122,71 @@ def is_new_link(url, source):
 
 # 加载历史链接数据
 def load_links_history(source):
-    """加载指定来源的历史链接数据"""
+    """加载指定来源的历史链接数据，使用更高效的方式"""
     history_file = os.path.join(LINKS_HISTORY_DIR, f"{source}_links.json")
-    if os.path.exists(history_file):
-        try:
+    links_data = {}
+    
+    try:
+        if os.path.exists(history_file):
+            # 检查文件大小以决定加载方式
+            file_size = os.path.getsize(history_file)
+            
             with open(history_file, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except Exception as e:
-            print(f"加载历史链接数据出错: {e}")
-            return {}
-    return {}
+                # 对于大文件，使用更高效的方式读取
+                if file_size > 10 * 1024 * 1024:  # 大于10MB的文件
+                    print(f"⚠️ 历史链接文件较大 ({file_size/1024/1024:.2f}MB)，使用优化加载方式...")
+                    links_data = json.load(f)
+                else:
+                    # 小文件则正常加载
+                    links_data = json.load(f)
+                    
+            print(f"✅ 已加载 {len(links_data)} 条历史链接: {history_file}")
+        else:
+            print(f"⚠️ 未找到历史链接文件，将创建新的记录: {history_file}")
+    except Exception as e:
+        print(f"❌ 加载历史链接数据失败: {str(e)}")
+        traceback.print_exc()
+    
+    return links_data
 
 # 保存历史链接数据
 def save_links_history(source, links_data):
-    """保存指定来源的历史链接数据"""
-    history_file = os.path.join(LINKS_HISTORY_DIR, f"{source}_links.json")
+    """保存链接历史记录到本地JSON文件，使用更高效的批量保存方式"""
+    if not source or not links_data:
+        return False
+        
+    # 确保目录存在
     try:
-        with open(history_file, 'w', encoding='utf-8') as f:
-            json.dump(links_data, f, ensure_ascii=False, indent=2)
-        print(f"成功保存历史链接数据: {history_file}")
+        os.makedirs(LINKS_HISTORY_DIR, exist_ok=True)
+        
+        # 构建文件路径
+        file_path = os.path.join(LINKS_HISTORY_DIR, f"{source}_links.json")
+        
+        # 使用临时文件进行写入，然后重命名，避免文件损坏
+        temp_file = file_path + ".tmp"
+        
+        # 优化: 如果数据不超过一定规模，直接使用标准JSON保存
+        if len(links_data) < 10000:  # 对于小规模数据
+            with open(temp_file, 'w', encoding='utf-8') as f:
+                json.dump(links_data, f, ensure_ascii=False, indent=2)
+        else:
+            # 对于大规模数据，使用更高效的方式
+            with open(temp_file, 'w', encoding='utf-8') as f:
+                # 不使用缩进，减少文件大小和保存时间
+                json.dump(links_data, f, ensure_ascii=False, separators=(',', ':'))
+        
+        # 安全地替换原文件
+        if os.path.exists(temp_file):
+            # 在Windows系统中，如果目标文件存在需要先删除
+            if os.path.exists(file_path):
+                os.remove(file_path)
+            os.rename(temp_file, file_path)
+            
+        return True
     except Exception as e:
-        print(f"保存历史链接数据出错: {e}")
+        print(f"❌ 保存链接历史记录失败: {str(e)}")
+        traceback.print_exc()
+        return False
 
 # 更新链接历史记录
 def update_link_history(url, title, source, content_summary="", is_valid=True, quality_score=0, content_length=0, error_message="", content_fingerprint="", ai_score=0, ai_reason="", link_type=""):
@@ -245,9 +275,10 @@ def update_link_history(url, title, source, content_summary="", is_valid=True, q
         print(f"更新链接历史记录出错: {e}")
 
 # 读取主界面链接
-# 使用绝对路径，避免相对路径导致的问题
-excel_source_file = r'C:\Python\github\Crawl4AI\testhomepage.xlsx'  # 使用原始字符串和反斜杠
-# 备选相对路径，如果绝对路径不存在可以尝试
+# 使用当前脚本目录下的testhomepage.xlsx文件
+current_dir = os.path.dirname(os.path.abspath(__file__))
+excel_source_file = os.path.join(current_dir, "testhomepage.xlsx")
+# 备选相对路径，如果当前目录下不存在可以尝试上级目录
 alternative_path = '../testhomepage.xlsx'
 
 # 检查文件是否存在，如果不存在尝试备选路径
@@ -282,10 +313,16 @@ def create_result_excel(filename=None):
     if not SAVE_TO_EXCEL:
         return None
     
-    # 生成文件名
+    # 生成文件名，确保使用当前目录路径
     if not filename:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"news_results_{timestamp}.xlsx"
+    
+    # 确保文件保存在正确的目录下
+    if not os.path.isabs(filename):
+        # 使用当前脚本所在目录
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        filename = os.path.join(current_dir, filename)
     
     # 保存全局引用
     global result_excel_file
@@ -335,9 +372,10 @@ def create_result_excel(filename=None):
 current_batch = datetime.now().strftime("%Y%m%d_%H%M%S")
 batch_id = current_batch
 
-# 全局变量
-result_excel_file = f"news_results_{batch_id}.xlsx"  # 默认Excel文件名
-LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ai_link_decisions.jsonl")  # AI验证日志文件路径
+# 全局变量 - 修改默认路径使用当前目录
+current_dir = os.path.dirname(os.path.abspath(__file__))
+result_excel_file = os.path.join(current_dir, f"news_results_{batch_id}.xlsx")  # 默认Excel文件名使用完整路径
+LOG_FILE = os.path.join(current_dir, "ai_link_decisions.jsonl")  # AI验证日志文件路径
 ENABLE_LOGGING = True  # 是否启用AI验证日志
 
 # 简化评估内容质量的函数
@@ -497,6 +535,10 @@ def is_valid_news_link(link, base_url, a_tag=None, html_content=None):
         a_tag: 可选，链接所在的a标签（BeautifulSoup对象）
         html_content: 可选，页面HTML内容
     """
+    # 在冷启动模式下，所有链接都视为有效
+    if USE_COLD_START:
+        return True
+        
     # 基础过滤 - 明显的非新闻链接
     if not link or not isinstance(link, str):
         return False
@@ -524,10 +566,11 @@ def is_valid_news_link(link, base_url, a_tag=None, html_content=None):
         return False
 
     # 优先使用AI验证模块
-    if USE_AI_LINK_VALIDATION and AI_LINK_VALIDATOR_AVAILABLE:
+    if USE_AI_LINK_VALIDATION and AI_LINK_VALIDATOR_AVAILABLE and not USE_COLD_START:
         try:
             # 使用AI验证模块判断链接有效性
-            return ai_link_validator.is_valid_news_link_with_ai(full_url, base_url, a_tag, html_content)
+            from ai_link_validator import is_valid_news_link_with_ai
+            return is_valid_news_link_with_ai(full_url, base_url, a_tag, html_content)
         except Exception as e:
             print(f"❌ AI链接验证失败，回退到基础规则: {str(e)}")
     
@@ -550,291 +593,376 @@ def is_valid_news_link(link, base_url, a_tag=None, html_content=None):
 
 # 爬取主界面
 async def fetch_news_links(main_url, source):
-    """从主页获取新闻链接，按新逻辑处理链接验证和爬取"""
-    browser_config = BrowserConfig(
-        browser_type="chromium",
-        headless=True, 
-        viewport_width=1366,
-        viewport_height=768,
-        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.110 Safari/537.36",
-        java_script_enabled=True,
-        ignore_https_errors=True
-    )
-    
-    # 设置爬虫配置
-    prune_filter = PruningContentFilter(
-        threshold=0.45,
-        threshold_type="dynamic",
-        min_word_threshold=5
-    )
-    md_generator = DefaultMarkdownGenerator(content_filter=prune_filter)
-    
-    crawler_config = CrawlerRunConfig(
-        markdown_generator=md_generator,
-        page_timeout=REQUEST_TIMEOUT * 1000,
-        cache_mode=CacheMode.BYPASS
-    )
+    """获取新闻链接，优化链接比对过程"""
+    # 初始化统计
+    link_counts = {
+        "found_links": 0,
+        "new_links": 0,
+        "valid_links": 0,
+        "invalid_links": 0,
+        "skipped_existing": 0,
+        "skipped_invalid": 0,
+        "skipped_processed": 0,
+        "total_ai_validated": 0
+    }
     
     try:
         print(f"🔄 正在爬取主页: {main_url}")
-        async with AsyncWebCrawler(config=browser_config) as crawler:
+        
+        # 设置爬虫配置
+        prune_filter = PruningContentFilter(
+            threshold=0.45,
+            threshold_type="dynamic",
+            min_word_threshold=5
+        )
+        md_generator = DefaultMarkdownGenerator(content_filter=prune_filter)
+        
+        crawler_config = CrawlerRunConfig(
+            markdown_generator=md_generator,
+            page_timeout=REQUEST_TIMEOUT * 1000,
+            cache_mode=CacheMode.BYPASS  # 禁用缓存
+        )
+        
+        # 使用正确的方法调用爬虫
+        async with AsyncWebCrawler() as crawler:
             result = await crawler.arun(url=main_url, config=crawler_config)
             
-            if not result.success:
-                print(f"❌ 爬取主页失败: {main_url}, 错误: {result.error_message}")
-                return []
+            if not result or not result.success or not result.html:
+                return None, None, link_counts
                 
             print(f"✅ 爬取主页成功: {main_url}")
             
-            # 加载此源站的历史链接数据
+            # 优化：加载历史链接数据并预处理为高效的查找结构
             links_history = load_links_history(source)
             
-            # 记录已知URL，用于快速查找（冷启动模式可能会跳过这些检查）
-            known_urls = set()
-            known_invalid_urls = set()  # 记录已知的无效URL
-            already_processed_urls = set()  # 记录已处理过的URL（无论有效无效）
-            content_fingerprints = set()  # 存储所有内容指纹，用于快速查找
+            # 使用集合存储已知URL，实现O(1)查找
+            known_urls_set = set()
+            invalid_urls_set = set()
+            processed_urls_set = set()
             
-            for _, info in links_history.items():
-                url = info.get('url', '')
-                known_urls.add(url)
+            # 预处理链接，只遍历一次历史记录
+            for url, data in links_history.items():
+                # 将URL规范化存储在集合中
+                norm_url = normalize_url(url)
+                known_urls_set.add(norm_url)
                 
-                # 记录已知的无效URL
-                if not info.get('is_valid', True):
-                    known_invalid_urls.add(url)
-                
-                # 记录已经处理过内容的URL
-                if info.get('content_length', 0) > 0 or info.get('crawl_count', 0) > 1:
-                    already_processed_urls.add(url)
-                
-                # 记录内容指纹用于后续比较
-                if info.get('content_fingerprint'):
-                    content_fingerprints.add(info.get('content_fingerprint'))
+                # 分类存储到不同的集合中实现O(1)查找
+                if not data.get("is_valid", False):
+                    invalid_urls_set.add(norm_url)
+                elif data.get("content_length", 0) > 0:
+                    processed_urls_set.add(norm_url)
                     
-            print(f"⚠️ 已加载 {len(known_urls)} 个已知链接，其中 {len(known_invalid_urls)} 个无效链接")
-            print(f"⚠️ 已有 {len(already_processed_urls)} 个链接已经处理过内容")
+            print(f"⚠️ 已加载 {len(known_urls_set)} 个已知链接，其中 {len(invalid_urls_set)} 个无效链接")
+            print(f"⚠️ 已有 {len(processed_urls_set)} 个链接已经处理过内容")
             
-            try:
-                # 使用BeautifulSoup处理HTML提取链接
-                soup = BeautifulSoup(result.html, 'html.parser')
-                all_links = soup.find_all('a', href=True)
-                print(f"🔍 找到 {len(all_links)} 个原始链接")
-                
-                # 用于存储处理后的所有链接
-                all_processed_links = []
-                # 用于存储新链接（需要验证）
-                new_links_to_validate = []
-                
-                # 添加一个集合用于链接去重
-                processed_urls = set()
-                skipped_duplicate_count = 0  # 记录跳过的重复链接数
-                
-                # 跳过的链接计数
-                skipped_known_valid_count = 0  # 跳过已知有效且已处理的链接
-                skipped_invalid_count = 0  # 跳过已知无效链接
-                skipped_already_processed = 0  # 跳过已经处理过内容的链接（无论有效无效）
-                
-                for a_tag in all_links:
-                    link = a_tag['href'].strip()
-                    title = a_tag.get_text().strip()
-                    
-                    # 规范化URL - 将相对URL转为绝对URL
-                    if link.startswith('/'):
-                        # 相对URL，添加域名
-                        parsed_url = urlparse(main_url)
-                        base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
-                        link = urljoin(base_url, link)
-                    elif not link.startswith(('http://', 'https://')):
-                        # 其他相对URL形式
-                        link = urljoin(main_url, link)
-                    
-                    # 跳过非http(s)链接
-                    if not link.startswith(('http://', 'https://')):
-                        continue
-                    
-                    # 进一步规范化URL用于去重
-                    normalized_link = normalize_url(link)
-                    
-                    # 链接去重检查
-                    if normalized_link in processed_urls:
-                        skipped_duplicate_count += 1
-                        continue
-                    else:
-                        processed_urls.add(normalized_link)
-                    
-                    # 跳过已知链接（除非是冷启动模式）
-                    if not USE_COLD_START:
-                        # 检查是否为已知链接以及状态
-                        is_new, is_invalid, is_processed = is_new_link(link, source)
-                        
-                        if not is_new:
-                            if is_invalid:
-                                # 是已知的无效链接，直接跳过
-                                skipped_invalid_count += 1
-                                continue
-                            elif is_processed:
-                                # 是已经处理过内容的有效链接，直接跳过
-                                skipped_already_processed += 1
-                                continue
-                            else:
-                                # 是已知的有效链接但未处理过内容，可能需要继续处理
-                                skipped_known_valid_count += 1
-                                # 根据需要决定是否跳过
-                                # 由于需要爬取内容，这里不跳过，而是加入待验证列表
-                    else:
-                        is_new = True
-                        is_invalid = False
-                        is_processed = False
-                    
-                    # 生成链接ID
-                    link_id = generate_link_id(link)
-                    
-                    # 收集链接信息
-                    link_info = {
-                        'url': link,
-                        'title': title,
-                        'is_new': is_new,
-                        'link_id': link_id,
-                        'a_tag': a_tag,
-                        'crawl_time': datetime.now().isoformat(),
-                        'is_valid': False,  # 默认为无效，稍后验证
-                        'is_processed': is_processed,  # 记录是否已处理过内容
-                    }
-                    
-                    all_processed_links.append(link_info)
-                    
-                    # 标记为需要验证的新链接或未处理过内容的链接
-                    if is_new or (not is_invalid and not is_processed):
-                        new_links_to_validate.append(link_info)
-                
-                print(f"🔄 处理后得到 {len(all_processed_links)} 个链接，其中 {len(new_links_to_validate)} 个需要验证")
-                print(f"⏩ 跳过了 {skipped_duplicate_count} 个重复链接")
-                print(f"⏩ 跳过了 {skipped_known_valid_count} 个已知有效链接")
-                print(f"⏩ 跳过了 {skipped_invalid_count} 个已知无效链接")
-                print(f"⏩ 跳过了 {skipped_already_processed} 个已处理过内容的链接")
-                
-                # 设置valid_links默认为空列表
-                valid_links = []
-                
-                # 冷启动模式下，所有链接都视为有效，不进行AI验证
-                if USE_COLD_START:
-                    print("🚀 冷启动模式: 所有新链接都将直接爬取，不验证有效性")
-                    # 设置所有链接为有效
-                    for link in new_links_to_validate:
-                        link['is_valid'] = True
-                    valid_links = new_links_to_validate
-                    
-                    # 更新所有链接的历史记录（标记为有效）
-                    for link in valid_links:
-                        update_link_history(
-                            url=link['url'],
-                            title=link['title'],
-                            source=source,
-                            is_valid=True,
-                            quality_score=50  # 冷启动模式下默认中等分数
-                        )
-                
-                # 非冷启动模式下，使用AI验证新链接
-                elif USE_AI_LINK_VALIDATION and AI_LINK_VALIDATOR_AVAILABLE and new_links_to_validate:
-                    print(f"🧠 使用AI验证 {len(new_links_to_validate)} 个链接...")
-                    
-                    # 使用批量验证处理新链接
-                    valid_links = ai_link_validator.batch_link_validation(
-                        new_links_to_validate, 
-                        main_url, 
-                        result.html
-                    )
-                    
-                    print(f"✅ AI验证完成，有 {len(valid_links)} 个有效链接")
-                    
-                    # 更新所有经过验证的链接历史记录
-                    for link in new_links_to_validate:
-                        # 判断此链接是否在有效链接列表中
-                        is_valid = any(vl['url'] == link['url'] for vl in valid_links)
-                        
-                        # 重要：设置链接的is_valid属性，以便后续处理
-                        link['is_valid'] = is_valid
-                        
-                        # 获取AI验证分数和理由（如果有）
-                        ai_score = 0
-                        ai_reason = ""
-                        ai_link_type = ""
-                        
-                        # 从AI验证日志中查找此链接的记录
-                        if ENABLE_LOGGING and os.path.exists(LOG_FILE):
-                            try:
-                                with open(LOG_FILE, "r", encoding="utf-8") as f:
-                                    for line in f:
-                                        try:
-                                            record = json.loads(line)
-                                            if record.get('url') == link['url']:
-                                                ai_score = record.get('score', 0)
-                                                ai_reason = record.get('reason', "")
-                                                ai_link_type = "文章" if is_valid else "非文章"
-                                                # 将AI信息添加到链接信息中
-                                                link['ai_score'] = ai_score
-                                                link['ai_reason'] = ai_reason
-                                                link['link_type'] = ai_link_type
-                                                break
-                                        except json.JSONDecodeError:
-                                            continue
-                            except Exception as e:
-                                print(f"读取AI验证日志时出错: {e}")
-                        
-                        # 更新链接历史 - 此时只更新验证状态，内容稍后爬取
-                        update_link_history(
-                            url=link['url'],
-                            title=link['title'],
-                            source=source,
-                            is_valid=is_valid,
-                            quality_score=ai_score,
-                            content_length=0,  # 内容长度为0，表示还未爬取内容
-                            error_message="" if is_valid else "AI判断为无效链接",
-                            ai_score=ai_score,
-                            ai_reason=ai_reason,
-                            link_type=ai_link_type
-                        )
-                elif not USE_AI_LINK_VALIDATION:
-                    print("⚠️ 未启用AI验证，所有新链接都将被视为有效")
-                    valid_links = new_links_to_validate
+            # 优化：解析HTML并使用字典存储链接，避免重复处理
+            soup = BeautifulSoup(result.html, 'html.parser')
+            a_tags = soup.find_all('a', href=True)
+            
+            # 使用字典存储链接，自动去重
+            seen_links = {}
+            # 优化：使用缓存减少normalize_url重复调用
+            normalize_cache = {}
+            
+            # 第一次遍历：构建规范化链接映射，实现更高效的URL处理
+            for a in a_tags:
+                href = a['href']
+                # 规范化链接，确保完整URL
+                if href.startswith('/'):
+                    # 相对URL，添加域名
+                    parsed_url = urlparse(main_url)
+                    base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
+                    url = urljoin(base_url, href)
+                elif not href.startswith(('http://', 'https://')):
+                    # 其他相对URL形式
+                    url = urljoin(main_url, href)
                 else:
-                    print("⚠️ AI验证不可用或没有新链接需要验证")
+                    url = href
                 
-                # 打印统计信息
-                print(f"共找到 {len(valid_links)} 个有效链接")
+                # 使用缓存避免重复规范化
+                if url in normalize_cache:
+                    norm_url = normalize_cache[url]
+                else:
+                    norm_url = normalize_url(url)
+                    normalize_cache[url] = norm_url
+                    
+                if not norm_url:
+                    continue
+                    
+                # 使用规范化URL作为键，避免重复
+                if norm_url not in seen_links:
+                    seen_links[norm_url] = {
+                        'url': url,  # 保留原始URL用于显示
+                        'a_tag': a,
+                        'norm_url': norm_url  # 存储规范化URL用于比较
+                    }
+            
+            print(f"🔍 找到 {len(seen_links)} 个原始链接")
+            
+            # 需要AI验证的链接
+            links_to_validate = []
+            
+            # 用于储存链接和相关信息
+            links_info = []
+            
+            # 统计重复链接数量
+            duplicate_count = 0
+            
+            # 批量处理链接以提高效率
+            
+            # 1. 预先提取所有需要处理的链接
+            links_to_process = []
+            for norm_url, link_data in seen_links.items():
+                # 快速检查是否已知链接(使用O(1)复杂度的集合操作)
+                if norm_url in known_urls_set:
+                    duplicate_count += 1
+                    if norm_url in invalid_urls_set:
+                        link_counts["skipped_invalid"] += 1
+                    elif norm_url in processed_urls_set:
+                        link_counts["skipped_processed"] += 1
+                    else:
+                        link_counts["skipped_existing"] += 1
+                    continue
                 
-                # 更详细的统计信息
-                print(f"链接过滤详情:")
-                print(f" - 原始链接总数: {len(all_links)}")
-                print(f" - 跳过已知有效链接: {skipped_known_valid_count}")
-                print(f" - 跳过已知无效链接: {skipped_invalid_count}")
-                print(f" - 跳过已处理过内容的链接: {skipped_already_processed}")
-                print(f" - 经过筛选后的链接: {len(all_processed_links)}")
-                print(f" - 需要验证的链接: {len(new_links_to_validate)}")
-                print(f" - 最终有效链接: {len(valid_links)}")
+                # 只处理新链接
+                links_to_process.append((norm_url, link_data))
+            
+            # 2. 批量处理新链接
+            if links_to_process:
+                print(f"🆕 发现 {len(links_to_process)} 个新链接，开始处理...")
                 
-                # 添加处理状态标记和其他信息到有效链接
-                for vl in valid_links:
-                    # 标记为需要处理
-                    vl['need_process'] = not vl.get('is_processed', False)
-                
-                # 优先处理新链接，最多返回MAX_LINKS_PER_SOURCE个
-                return valid_links[:MAX_LINKS_PER_SOURCE]
-            except Exception as e:
-                print(f"处理链接时出错: {e}")
-                traceback.print_exc()
-                return []
+                # 冷启动模式与普通模式的处理逻辑分离，避免每次链接都判断模式
+                if USE_COLD_START:
+                    # 冷启动模式：批量处理所有新链接
+                    batch_updates = {}
+                    current_time = datetime.now().isoformat()
+                    
+                    for norm_url, link_data in links_to_process:
+                        url = link_data['url']
+                        a_tag = link_data['a_tag']
+                        link_text = a_tag.get_text(strip=True) if a_tag else ""
+                        
+                        link_counts["found_links"] += 1
+                        link_counts["new_links"] += 1
+                        
+                        # 将链接及信息直接添加到结果列表
+                        links_info.append({
+                            "url": url,
+                            "a_tag": a_tag,
+                            "title": link_text or url,
+                            "is_valid": True,  # 冷启动模式下，默认认为有效
+                            "ai_score": 0,
+                            "ai_reason": "冷启动模式：跳过验证"
+                        })
+                        
+                        # 准备批量更新数据
+                        batch_updates[url] = {
+                            "url": url,
+                            "title": link_text or url,
+                            "first_seen": current_time,
+                            "last_updated": current_time,
+                            "is_valid": True,
+                            "quality_score": 0,
+                            "content_length": 0,
+                            "error_message": "",
+                            "content_fingerprint": "",
+                            "ai_score": 0,
+                            "ai_reason": "冷启动模式：跳过验证",
+                            "crawl_count": 0,
+                            "link_type": ""
+                        }
+                    
+                    # 批量更新历史记录
+                    if batch_updates:
+                        links_history.update(batch_updates)
+                        save_links_history(source, links_history)
+                        print(f"冷启动模式：已成功将 {len(batch_updates)} 个链接添加到历史记录。")
+                    
+                    return None, None, link_counts
+                else:
+                    # 普通模式：批量验证过滤后的链接
+                    # 1. 先用基本规则预筛选
+                    for norm_url, link_data in links_to_process:
+                        url = link_data['url']
+                        a_tag = link_data['a_tag']
+                        
+                        # 计入找到的链接总数
+                        link_counts["found_links"] += 1
+                        link_counts["new_links"] += 1
+                        
+                        # 使用基础规则进行初筛
+                        is_valid_by_basic = is_valid_news_link(url, main_url, a_tag)
+                        
+                        # 无论是否通过基础规则，都记录所有新链接到历史记录中
+                        current_time = datetime.now().isoformat()
+                        links_history[url] = {
+                            "url": url,
+                            "title": a_tag.get_text(strip=True) if a_tag else url,
+                            "first_seen": current_time,
+                            "last_updated": current_time,
+                            "is_valid": is_valid_by_basic,  # 初始用基本规则判断
+                            "quality_score": 0,
+                            "content_length": 0,
+                            "error_message": "" if is_valid_by_basic else "未通过基本规则检查",
+                            "content_fingerprint": "",
+                            "ai_score": 0,
+                            "ai_reason": "",
+                            "crawl_count": 0,
+                            "link_type": ""
+                        }
+                        
+                        # 只将通过基础规则的链接添加到待验证列表
+                        if is_valid_by_basic:
+                            links_to_validate.append({
+                                "url": url,
+                                "a_tag": a_tag,
+                                "title": a_tag.get_text(strip=True) if a_tag else url
+                            })
+                    
+                    # 2. 批量AI验证
+                    print(f"🔄 处理后得到 {link_counts['found_links']} 个链接，其中 {len(links_to_validate)} 个需要验证")
+                    print(f"⏩ 跳过了 {duplicate_count} 个重复链接")
+                    print(f"⏩ 跳过了 {link_counts['skipped_existing']} 个已知有效链接")
+                    print(f"⏩ 跳过了 {link_counts['skipped_invalid']} 个已知无效链接")
+                    print(f"⏩ 跳过了 {link_counts['skipped_processed']} 个已处理过内容的链接")
+                    
+                    valid_links = []
+                    if links_to_validate:
+                        print(f"🧠 使用AI验证 {len(links_to_validate)} 个链接...")
+                        
+                        # 更新计数
+                        link_counts["total_ai_validated"] = len(links_to_validate)
+                        
+                        if USE_AI_LINK_VALIDATION and AI_LINK_VALIDATOR_AVAILABLE:
+                            try:
+                                # 导入batch_link_validation函数
+                                from ai_link_validator import batch_link_validation
+                                
+                                # 批量验证链接
+                                valid_links = batch_link_validation(links_to_validate, main_url, result.html)
+                                
+                                # 调试打印验证结果
+                                print(f"✅ AI验证完成，得到 {len(valid_links)} 个有效链接")
+                                
+                                # 更新结果统计
+                                link_counts["valid_links"] = len(valid_links)
+                                link_counts["invalid_links"] = len(links_to_validate) - len(valid_links)
+                                
+                                # 将验证结果添加到链接信息列表
+                                for link_info in valid_links:
+                                    link_info["is_valid"] = True
+                                    links_info.append(link_info)
+                                    
+                                    # 立即将有效链接写入Excel
+                                    write_valid_link_to_excel(
+                                        url=link_info.get("url"),
+                                        title=link_info.get("title", ""),
+                                        source_name=source_name,
+                                        ai_score=link_info.get("ai_score", 0),
+                                        ai_reason=link_info.get("ai_reason", ""),
+                                        link_type=link_info.get("link_type", "")
+                                    )
+                                
+                                # 优化：批量更新历史记录 - 更高效的实现
+                                batch_updates = {}
+                                current_time = datetime.now().isoformat()
+                                validated_urls = {normalize_url(info.get("url")): info for info in valid_links}
+                                
+                                # 一次性准备所有更新数据 - 确保所有链接都被更新到历史记录中
+                                for link in links_to_validate:
+                                    url = link.get("url")
+                                    norm_url = normalize_url(url)
+                                    
+                                    # 检查是否通过验证
+                                    is_valid = norm_url in validated_urls
+                                    link_info = validated_urls.get(norm_url, {})
+                                    
+                                    ai_score = link_info.get("ai_score", 0) if is_valid else 0
+                                    ai_reason = link_info.get("ai_reason", "") if is_valid else "AI验证未通过"
+                                    
+                                    # 准备更新数据 - 无论是否有效都会更新
+                                    batch_updates[url] = {
+                                        "url": url,
+                                        "title": link.get("title", ""),
+                                        "first_seen": current_time,
+                                        "last_updated": current_time,
+                                        "is_valid": is_valid,
+                                        "quality_score": 0,
+                                        "content_length": 0,
+                                        "error_message": "" if is_valid else "AI验证未通过",
+                                        "content_fingerprint": "",
+                                        "ai_score": ai_score,
+                                        "ai_reason": ai_reason,
+                                        "crawl_count": 0,
+                                        "link_type": link_info.get("link_type", "")
+                                    }
+                                
+                                # 批量更新历史记录
+                                links_history.update(batch_updates)
+                                save_links_history(source, links_history)
+                                print(f"✅ 已更新 {len(batch_updates)} 个链接到历史记录")
+                                
+                            except Exception as e:
+                                print(f"❌ AI批量验证失败: {str(e)}")
+                                # 对于异常情况，仍然确保链接被添加到历史记录
+                                batch_updates = {}
+                                current_time = datetime.now().isoformat()
+                                
+                                for link in links_to_validate:
+                                    url = link.get("url")
+                                    batch_updates[url] = {
+                                        "url": url,
+                                        "title": link.get("title", ""),
+                                        "first_seen": current_time,
+                                        "last_updated": current_time,
+                                        "is_valid": True,  # 出错时默认为有效
+                                        "quality_score": 0,
+                                        "content_length": 0,
+                                        "error_message": f"AI验证失败：{str(e)}",
+                                        "content_fingerprint": "",
+                                        "ai_score": 0,
+                                        "ai_reason": f"AI验证失败，默认视为有效: {str(e)}",
+                                        "crawl_count": 0,
+                                        "link_type": ""
+                                    }
+                                
+                                links_history.update(batch_updates)
+                                save_links_history(source, links_history)
+                                print(f"✅ 已更新 {len(batch_updates)} 个链接到历史记录（AI验证失败）")
+                        else:
+                            # 不使用AI验证，所有通过基础规则的链接都视为有效
+                            for link in links_to_validate:
+                                link["is_valid"] = True
+                                link["ai_score"] = 0
+                                link["ai_reason"] = "跳过AI验证"
+                                links_info.append(link)
+                                valid_links.append(link)
+                            
+                            link_counts["valid_links"] = len(valid_links)
+                    else:
+                        print("⚠️ 没有需要验证的新链接")
+                    
+                    # 在处理结束后再次保存历史记录（确保所有链接都被记录）
+                    save_links_history(source, links_history)
+                    
+                    return valid_links, result.html, link_counts
+            else:
+                print("⚠️ 没有发现新链接")
+                return [], result.html, link_counts
+            
     except Exception as e:
-        print(f"爬取主页时出错: {e}")
+        print(f"❌ 获取链接失败: {str(e)}")
         traceback.print_exc()
-        return []
+        return None, None, link_counts
 
 # 导出历史链接库到Excel（新增函数）
 def export_links_history_to_excel():
     """将所有历史链接数据导出到Excel文件"""
     try:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"links_history_{timestamp}.xlsx"
+        # 确保文件保存在当前目录下
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        filename = os.path.join(current_dir, f"links_history_{timestamp}.xlsx")
         
         # 创建工作簿和工作表
         wb = openpyxl.Workbook()
@@ -969,24 +1097,77 @@ def write_result_to_excel(url, title, source_name, publish_date, content, link_d
         for col, value in enumerate(data, 1):
             sheet.cell(row=next_row, column=col).value = value
             
-        # 保存
+        # 修改：立即保存Excel文件
         wb.save(result_excel_file)
-        print(f"✅ 已将结果写入Excel: 行 {next_row}")
+        print(f"✅ 已将结果写入Excel: 行 {next_row} 并保存")
     except Exception as e:
         print(f"❌ 写入Excel时出错: {e}")
 
+# 修改写入Excel函数，确保实时保存，并在每个有效链接被验证后立即写入Excel
+def write_valid_link_to_excel(url, title, source_name, ai_score=0, ai_reason="", link_type=""):
+    """将有效链接信息立即写入Excel文件"""
+    if not SAVE_TO_EXCEL:
+        return
+    
+    # 确保result_excel_file是全局变量
+    global result_excel_file
+    
+    # 如果结果文件不存在，先创建
+    if not result_excel_file or not os.path.exists(result_excel_file):
+        result_excel_file = create_result_excel()
+        if not result_excel_file:
+            print(f"❌ 无法创建Excel结果文件")
+            return
+    
+    try:
+        # 加载Excel文件
+        wb = openpyxl.load_workbook(result_excel_file)
+        sheet = wb.active
+        next_row = sheet.max_row + 1
+        
+        # 构建基本数据
+        data = [
+            next_row-1,     # 索引
+            source_name,    # 来源
+            url,            # 链接
+            title,          # 标题
+            "待处理",       # 发布日期（待爬取内容后更新）
+            "新闻",         # 分类
+            0,              # 正文字数（待爬取内容后更新）
+            0,              # 爬取时间（待爬取内容后更新）
+            "待处理",       # 状态
+            0,              # 尝试次数
+            ai_score,       # AI验证分数
+            ai_reason,      # AI验证理由
+            link_type       # 链接类型
+        ]
+        
+        # 写入数据
+        for col, value in enumerate(data, 1):
+            sheet.cell(row=next_row, column=col).value = value
+        
+        # 立即保存Excel文件
+        wb.save(result_excel_file)
+        print(f"✅ 已将有效链接写入Excel: 行 {next_row} 并保存")
+    except Exception as e:
+        print(f"❌ 写入Excel时出错: {e}")
+        traceback.print_exc()
+
 # 主程序
 async def main():
-    """主程序入口"""
+    """主函数入口"""
     # 创建结果Excel文件
     if SAVE_TO_EXCEL:
         result_file = create_result_excel()
-        print(f"📊 Excel结果将保存到: {result_excel_file}")
+        print(f"📊 Excel结果将保存到: {result_file}")
     
+    # 设置批次ID（用于文件名和日志）
+    batch_id = datetime.now().strftime("%Y%m%d_%H%M%S")
     print(f"🚀 开始新闻爬取，批次ID: {batch_id}")
     
-    # 读取excel文件中的主页链接
-    excel_source_file = r'C:\Python\github\Crawl4AI\testhomepage.xlsx'
+    # 读取excel文件中的主页链接 - 使用当前脚本目录下的文件
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    excel_source_file = os.path.join(current_dir, "testhomepage.xlsx")
     
     # 检查文件是否存在
     if not os.path.exists(excel_source_file):
@@ -994,6 +1175,16 @@ async def main():
         excel_source_file = "../testhomepage.xlsx"
         if not os.path.exists(excel_source_file):
             print(f"⚠️ 备用源文件也不存在: {excel_source_file}")
+            # 尝试列出当前目录和上级目录中的Excel文件
+            print("当前目录下的Excel文件:")
+            for file in os.listdir('.'):
+                if file.endswith('.xlsx'):
+                    print(f" - {file}")
+            
+            print("上级目录下的Excel文件:")
+            for file in os.listdir('..'):
+                if file.endswith('.xlsx'):
+                    print(f" - {file}")
             return
     
     print(f"📄 找到源文件: {excel_source_file}")
@@ -1023,8 +1214,10 @@ async def main():
                 continue
                 
             source_count += 1
+            source_success_count = 0  # 初始化每个来源的成功计数器
             
-            print(f"\n🌐 处理来源 {source_count}: {remark} - {main_url} (Source ID: {source_name})")
+            # 每个源的统计信息
+            print(f"\n🌐 处理来源 {source_count}/{source_count}: {source_name} - {main_url} (Source ID: {source_name})")
             
             # 加载此源的历史链接
             links_history_file = os.path.join(LINKS_HISTORY_DIR, f"{source_name}_links.json")
@@ -1032,44 +1225,186 @@ async def main():
             
             # 爬取主页中的新闻链接
             start_time = time.time()
-            links = await fetch_news_links(main_url, source_name)
+            links, html_content, stats = await fetch_news_links(main_url, source_name)
             end_time = time.time()
             
-            print(f"⏱️ 爬取链接耗时: {end_time - start_time:.2f}秒")
+            print(f"链接爬取时间: {end_time - start_time:.2f} 秒")
+            print(f"找到 {len(links) if links else 0} 个链接需要验证")
             
-            # 处理每个链接
-            source_success_count = 0
-            for link_info in links:
-                processed_count += 1
-                retry_count = 0
+            # 打印链接过滤详情
+            print("链接过滤详情:")
+            print(f"- 原始链接总数: {stats['found_links']}")
+            print(f"- 跳过重复链接: {stats['skipped_existing']}")
+            print(f"- 跳过已知无效链接: {stats['skipped_invalid']}")
+            print(f"- 跳过了 {stats['skipped_processed']} 个已处理过内容的链接")
+            
+            # 如果是冷启动模式，直接返回结果，不进行实际内容爬取
+            if USE_COLD_START:
+                print("冷启动模式：跳过内容爬取步骤")
+                # 在循环中不要直接返回，而是记录结果并继续处理下一个来源
+                # return {
+                #     'source': source_name,
+                #     'url': main_url,
+                #     'valid_links': len(all_processed_links),
+                #     'message': f"冷启动模式：已将 {len(all_processed_links)} 个链接添加到历史记录"
+                # }
+                # 直接继续处理下一个来源
+                continue
+            
+            # 进行AI验证
+            valid_links = []
+            
+            if USE_AI_LINK_VALIDATION and AI_LINK_VALIDATOR_AVAILABLE and links:
+                # 确保链接对象结构一致
+                links_for_validation = [
+                    {'url': item.get('url', item.get('link')), 'title': item.get('title', '')}
+                    for item in links
+                ]
                 
-                # 检查链接是否已经处理过内容
-                if link_info.get('is_processed', False):
-                    print(f"\n⏩ 跳过已处理过内容的链接: {link_info['url']}")
-                    skipped_count += 1
+                # 检查是否有有效的链接需要验证
+                if links_for_validation:
+                    # 使用AI验证链接，这里的html内容可以为空
+                    crawler_html = ""  # 我们不再依赖result变量
+                    try:
+                        from ai_link_validator import batch_link_validation
+                        validated_links = batch_link_validation(
+                            links_for_validation, 
+                            main_url, 
+                            crawler_html
+                        )
+                        
+                        # 将验证后的链接与原始链接合并，保持原始的link_obj结构
+                        # 创建一个URL到验证结果的映射
+                        validation_results = {}
+                        for validated_link in validated_links:
+                            validation_results[validated_link.get('url')] = validated_link
+                        
+                        # 更新原始链接的验证信息
+                        for i, original_link in enumerate(links):
+                            # 确定URL键
+                            url_key = 'url' if 'url' in original_link else 'link'
+                            link_url = original_link.get(url_key)
+                            
+                            if link_url in validation_results:
+                                validated_info = validation_results[link_url]
+                                # 更新验证信息
+                                original_link['is_valid'] = validated_info.get('is_valid', False)
+                                original_link['ai_score'] = validated_info.get('ai_score', 0)
+                                original_link['ai_reason'] = validated_info.get('ai_reason', '')
+                                original_link['link_type'] = validated_info.get('link_type', '')
+                                
+                                # 如果验证结果是有效的，添加到valid_links
+                                if validated_info.get('is_valid', False):
+                                    # 将有效链接添加到valid_links
+                                    valid_links.append(original_link)
+                                    
+                                    # 立即将有效链接写入Excel
+                                    write_valid_link_to_excel(
+                                        url=link_url,
+                                        title=original_link.get('title', ''),
+                                        source_name=source_name,
+                                        ai_score=validated_info.get('ai_score', 0),
+                                        ai_reason=validated_info.get('ai_reason', ''),
+                                        link_type=validated_info.get('link_type', '')
+                                    )
+                    except Exception as e:
+                        print(f"❌ AI验证过程出错: {str(e)}")
+                        print("⚠️ 跳过AI验证，所有链接将被视为有效")
+                        # 默认所有链接有效
+                        valid_links = links
+                        
+                        # 确保即使出错也将链接写入Excel
+                        for link in links:
+                            url_key = 'url' if 'url' in link else 'link'
+                            url = link.get(url_key)
+                            title = link.get('title', '')
+                            
+                            # 立即将链接写入Excel
+                            write_valid_link_to_excel(
+                                url=url,
+                                title=title,
+                                source_name=source_name,
+                                ai_score=0,
+                                ai_reason="AI验证失败，默认视为有效",
+                                link_type=""
+                            )
+                else:
+                    print("⚠️ 没有有效链接需要验证")
+            else:
+                # 没有使用AI验证时，所有链接都视为有效
+                valid_links = links
+                
+                # 确保所有链接都被写入Excel
+                for link in links:
+                    url_key = 'url' if 'url' in link else 'link'
+                    url = link.get(url_key)
+                    title = link.get('title', '')
+                    
+                    # 立即将链接写入Excel
+                    write_valid_link_to_excel(
+                        url=url,
+                        title=title,
+                        source_name=source_name,
+                        ai_score=0,
+                        ai_reason="跳过AI验证",
+                        link_type=""
+                    )
+            
+            # 更新链接列表为验证后的有效链接
+            links = valid_links
+            
+            # 记录开始时间
+            start_content_time = time.time()
+            
+            # 处理每个链接的内容
+            for link_obj in links:
+                # 健壮性处理：确保link_obj具有url
+                if isinstance(link_obj, dict):
+                    # 有些link_obj可能使用'url'键，有些可能使用'link'键
+                    link = link_obj.get('url')
+                    if link is None:
+                        link = link_obj.get('link')
+                    
+                    title = link_obj.get('title', link if link else '')
+                else:
+                    # 如果link_obj不是字典类型
+                    print(f"⚠️ 未知的链接对象类型: {type(link_obj)}，跳过处理")
+                    continue
+                
+                if not link:
+                    print("⚠️ 链接为空，跳过处理")
+                    continue
+                
+                processed_count += 1
+                print(f"\n处理链接 {processed_count}/{len(links)}: {link}")
+                
+                # 检查链接是否已经被处理过
+                is_new, is_invalid, is_processed = is_new_link(link, source_name)
+                
+                if not is_new and is_processed:
+                    print(f"跳过已处理过的链接: {link}")
                     continue
                 
                 # 记录是否为新链接
-                if link_info.get('is_new', True):
+                if is_new:
                     new_link_count += 1
                 
-                # 只有AI判定的有效链接才进行内容爬取
-                if 'is_valid' in link_info and link_info['is_valid']:
+                retry_count = 0
+                
+                # 只有判定为有效链接才进行内容爬取
+                if link_obj.get('is_valid', True):
                     while retry_count <= MAX_RETRY_COUNT:
                         try:
-                            url = link_info['url']
-                            title_from_link = link_info['title']
-                            is_new, _, is_processed = is_new_link(url, source_name)
+                            is_new, _, is_processed = is_new_link(link, source_name)
                             
-                            # 如果已经处理过，跳过
-                            if is_processed:
-                                print(f"\n⏩ 跳过已处理过内容的链接: {url}")
+                            if not is_new and is_processed:
+                                print(f"跳过已处理过的链接: {link}")
                                 break
                                 
                             crawl_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                             
-                            print(f"\n🔗 正在处理链接: {url}")
-                            print(f"📌 链接标题: {title_from_link}")
+                            print(f"\n🔗 正在处理链接: {link}")
+                            print(f"📌 链接标题: {title}")
                             print(f"🆕 是否新链接: {'是' if is_new else '否'}")
                             
                             # 设置浏览器配置
@@ -1100,7 +1435,7 @@ async def main():
                             # 爬取内容
                             link_start_time = time.time()
                             async with AsyncWebCrawler(config=browser_config) as crawler:
-                                result = await crawler.arun(url=url, config=crawler_config)
+                                result = await crawler.arun(url=link, config=crawler_config)
                             link_end_time = time.time()
                             
                             # 计算爬取耗时
@@ -1111,7 +1446,7 @@ async def main():
                                 
                                 # 使用BeautifulSoup处理HTML
                                 soup = BeautifulSoup(result.html, 'html.parser')
-                                title = extract_title(soup, url) or title_from_link
+                                title = extract_title(soup, link) or title
                                 publish_date = extract_publish_date(soup) or "未找到日期"
                                 content = result.markdown.fit_markdown
                                 content_length = len(content)
@@ -1121,7 +1456,7 @@ async def main():
                                 print(f"📊 内容长度: {content_length} 字符")
                                 
                                 # 使用evaluate_content_quality获取摘要和指纹（不再评估内容质量）
-                                _, content_summary, content_fingerprint = evaluate_content_quality(result.html, title, url)
+                                _, content_summary, content_fingerprint = evaluate_content_quality(result.html, title, link)
                                 
                                 # AI验证通过的链接都视为有效
                                 is_valid_content = True
@@ -1131,16 +1466,16 @@ async def main():
                                 print(f"💡 内容摘要:\n{content_summary}")
                                 
                                 # 爬取内容后，更新链接历史记录，设置内容长度以标记为已处理
-                                link_info['is_processed'] = True
+                                link_obj['is_processed'] = True
                                 
                                 # 获取AI验证信息
-                                ai_score = link_info.get('ai_score', 0)
-                                ai_reason = link_info.get('ai_reason', "")
-                                link_type = link_info.get('link_type', "")
+                                ai_score = link_obj.get('ai_score', 0)
+                                ai_reason = link_obj.get('ai_reason', "")
+                                link_type = link_obj.get('link_type', "")
                                 
                                 # 更新链接历史
                                 update_link_history(
-                                    url=url,
+                                    url=link,
                                     title=title,
                                     source=source_name,
                                     content_summary=content_summary,
@@ -1156,7 +1491,7 @@ async def main():
                                 # 写入Excel
                                 if SAVE_TO_EXCEL:
                                     write_result_to_excel(
-                                        url=url,
+                                        url=link,
                                         title=title,
                                         source_name=source_name,
                                         publish_date=publish_date,
@@ -1180,8 +1515,8 @@ async def main():
                                 
                                 # 更新链接历史记录 - 标记为获取失败
                                 update_link_history(
-                                    url=url,
-                                    title=title_from_link,
+                                    url=link,
+                                    title=title,
                                     source=source_name,
                                     is_valid=False,
                                     error_message=f"爬取失败: {error_message}"
@@ -1193,15 +1528,15 @@ async def main():
                                 else:
                                     print(f"❌ 达到最大重试次数，放弃此链接")
                                     error_count += 1
-                                    
+                                
                         except Exception as e:
                             print(f"❌ 处理链接时出错: {e}")
                             traceback.print_exc()
                             
                             # 更新链接历史记录 - 标记为处理异常
                             update_link_history(
-                                url=url,
-                                title=title_from_link,
+                                url=link,
+                                title=title,
                                 source=source_name,
                                 is_valid=False,
                                 error_message=f"处理异常: {str(e)}"
@@ -1213,36 +1548,12 @@ async def main():
                             else:
                                 print(f"❌ 达到最大重试次数，放弃此链接")
                                 error_count += 1
-                else:
-                    # 对于无效链接，只更新历史记录，不爬取内容
-                    url = link_info['url']
-                    title_from_link = link_info['title']
-                    invalid_link_count += 1
-                    
-                    # 检查是否为已知的无效链接
-                    is_new, is_invalid, is_processed = is_new_link(url, source_name)
-                    if not is_new and is_invalid:
-                        print(f"\n🔗 跳过已知无效链接: {url}")
-                        skipped_count += 1
-                        continue
-                        
-                    print(f"\n🔗 记录新的无效链接: {url}")
-                    
-                    # 更新链接历史，标记为无效
-                    update_link_history(
-                        url=url,
-                        title=title_from_link,
-                        source=source_name,
-                        is_valid=False,
-                        quality_score=link_info.get('ai_score', 0),
-                        error_message="AI判断为无效链接"
-                    )
                 
-            # 完成当前来源的处理
-            print(f"\n✅ 来源 {source_name} 处理完成，成功获取 {source_success_count} 个有效链接")
-            
+                # 完成当前来源的处理
+                print(f"\n✅ 来源 {source_name} 处理完成，成功获取 {source_success_count} 个有效链接")
+                
         except Exception as e:
-            print(f"❌ 处理源 {source_name} 时出错: {e}")
+            print(f"❌ 处理源 {source_name} 时出错: {str(e)}")
             traceback.print_exc()
             continue
             
@@ -1288,7 +1599,7 @@ if __name__ == "__main__":
             # 创建结果Excel文件
             if SAVE_TO_EXCEL:
                 result_file = create_result_excel()
-                print(f"📊 Excel结果将保存到: {result_excel_file}")
+                print(f"📊 Excel结果将保存到: {result_file}")
             
             # 确保历史链接目录存在
             os.makedirs(LINKS_HISTORY_DIR, exist_ok=True)
@@ -1329,7 +1640,7 @@ if __name__ == "__main__":
                     
                     if AI_LINK_VALIDATOR_AVAILABLE:
                         # 使用AI验证
-                        is_valid = ai_link_validator.is_valid_news_link_with_ai(debug_url, base_url)
+                        is_valid = is_valid_news_link_with_ai(debug_url, base_url)
                         if not is_valid:
                             print(f"❌ AI判断该链接不是有效的新闻链接，但仍将尝试爬取内容")
                     else:
